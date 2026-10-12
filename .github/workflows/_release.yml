@@ -42,8 +42,10 @@ permissions:
 jobs:
   # Build the distribution package and extract version info
   build:
-    if: github.ref == 'refs/heads/main' || inputs.dangerous-nonmaster-release
+    # Fork dispatch ref is not main
+    if: true
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
 
@@ -71,7 +73,11 @@ jobs:
       # > from the publish job.
       # https://github.com/pypa/gh-action-pypi-publish#non-goals
       - name: Build project for distribution
-        run: uv build
+        run: |
+          # Pin the build backend to the version that produced the public wheel (WHEEL Generator: hatchling 1.29.0)
+          echo "hatchling==1.29.0" > /tmp/build-constraints.txt
+          uv build --build-constraint /tmp/build-constraints.txt
+          ls -l dist/
         working-directory: ${{ inputs.working-directory }}
 
       - name: Upload build
@@ -79,6 +85,7 @@ jobs:
         with:
           name: dist
           path: ${{ inputs.working-directory }}/dist/
+          if-no-files-found: error
 
       - name: Check version
         id: check-version
@@ -96,9 +103,12 @@ jobs:
               f.write(f"version={version}\n")
 
   test-pypi-publish:
+    # Disabled on the fork: needs OIDC trusted publishing we don't have
+    if: false
     needs:
       - build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       # This permission is used for trusted publishing:
       # https://blog.pypi.org/posts/2023-04-20-introducing-trusted-publishers/
@@ -132,7 +142,6 @@ jobs:
   pre-release-checks:
     needs:
       - build
-      - test-pypi-publish
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -230,11 +239,14 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
 
   publish:
+    # Disabled on the fork: publishing needs secrets
+    if: false
     needs:
       - build
       - test-pypi-publish
       - pre-release-checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       # This permission is used for trusted publishing:
       # https://blog.pypi.org/posts/2023-04-20-introducing-trusted-publishers/
@@ -271,12 +283,15 @@ jobs:
 
   mark-release:
     # Marks the GitHub release with the new version tag
+    # Disabled on the fork: tag creation needs secrets
+    if: false
     needs:
       - build
       - test-pypi-publish
       - pre-release-checks
       - publish
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       # This permission is needed by `ncipollo/release-action` to
       # create the GitHub release/tag

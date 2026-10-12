@@ -13,10 +13,7 @@
 name: "🔧 CI"
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-  merge_group:
+  workflow_dispatch:
 
 # Optimizes CI performance by canceling redundant workflow runs
 # If another push to the same PR or branch happens while this workflow is still running,
@@ -42,7 +39,7 @@ jobs:
   build:
     name: "Detect Changes & Set Matrix"
     runs-on: ubuntu-latest
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ci-ignore') }}
+    timeout-minutes: 10
     steps:
       - name: "📋 Checkout Code"
         uses: actions/checkout@v6
@@ -50,13 +47,12 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: "📂 Get Changed Files"
-        id: files
-        uses: Ana06/get-changed-files@v2.3.0
       - name: "🔍 Analyze Changed Files & Generate Build Matrix"
         id: set-matrix
+        # The changed-files action does not support workflow_dispatch on the fork,
+        # so we feed the package path so every libs/community suite runs.
         run: |
-          python .github/scripts/check_diff.py ${{ steps.files.outputs.all }} >> $GITHUB_OUTPUT
+          python .github/scripts/check_diff.py libs/community/pyproject.toml >> $GITHUB_OUTPUT
     outputs:
       dirs-to-lint: ${{ steps.set-matrix.outputs.dirs-to-lint }}
       dirs-to-test: ${{ steps.set-matrix.outputs.dirs-to-test }}
@@ -65,7 +61,8 @@ jobs:
   lint:
     name: cd ${{ matrix.working-directory }}
     needs: [build]
-    if: ${{ needs.build.outputs.dirs-to-lint != '[]' }}
+    # Lint gate is not a test; disabled on the fork.
+    if: false
     strategy:
       matrix:
         working-directory: ${{ fromJson(needs.build.outputs.dirs-to-lint) }}
@@ -76,6 +73,7 @@ jobs:
     secrets: inherit
 
   # Run unit tests only on packages that have changed files
+  # Inlined from _test.yml: the fork dispatcher requires timeout-minutes, which reusable-workflow callers cannot set.
   test:
     name: cd ${{ matrix.working-directory }}
     needs: [build]
@@ -83,13 +81,46 @@ jobs:
     strategy:
       matrix:
         working-directory: ${{ fromJson(needs.build.outputs.dirs-to-test) }}
-    uses: ./.github/workflows/_test.yml
-    with:
-      working-directory: ${{ matrix.working-directory }}
-      python-version: "3.11"
-    secrets: inherit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ matrix.working-directory }}
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v6
+
+      - name: "🐍 Set up Python 3.11 + UV"
+        uses: "./.github/actions/uv_setup"
+        id: setup-python
+        with:
+          python-version: "3.11"
+          cache-suffix: test-${{ matrix.working-directory }}
+          working-directory: ${{ matrix.working-directory }}
+
+      - name: "📦 Install Test Dependencies"
+        shell: bash
+        run: uv sync --group test --dev
+
+      - name: "🧪 Run Core Unit Tests"
+        shell: bash
+        run: |
+          make test
+
+      - name: "🧹 Verify Clean Working Directory"
+        shell: bash
+        run: |
+          set -eu
+
+          STATUS="$(git status)"
+          echo "$STATUS"
+
+          # grep will exit non-zero if the target message isn't found,
+          # and `set -e` above will cause the step to fail.
+          echo "$STATUS" | grep 'nothing to commit, working tree clean'
 
   # Test compatibility with different Pydantic versions for affected packages
+  # Inlined from _test_pydantic.yml: the fork dispatcher requires timeout-minutes, which reusable-workflow callers cannot set.
   test-pydantic:
     name: cd ${{ matrix.job-configs.working-directory }}
     needs: [build]
@@ -98,13 +129,51 @@ jobs:
       matrix:
         job-configs: ${{ fromJson(needs.build.outputs.test-pydantic) }}
       fail-fast: false
-    uses: ./.github/workflows/_test_pydantic.yml
-    with:
-      working-directory: ${{ matrix.job-configs.working-directory }}
-      pydantic-version: ${{ matrix.job-configs.pydantic-version }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ matrix.job-configs.working-directory }}
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v6
+
+      - name: "🐍 Set up Python 3.12 + UV"
+        uses: "./.github/actions/uv_setup"
+        with:
+          python-version: "3.12"
+          cache-suffix: test-pydantic-${{ matrix.job-configs.working-directory }}
+          working-directory: ${{ matrix.job-configs.working-directory }}
+
+      - name: "📦 Install Test Dependencies"
+        shell: bash
+        run: uv sync --group test
+
+      - name: "🔄 Install Specific Pydantic Version"
+        shell: bash
+        env:
+          PYDANTIC_VERSION: ${{ matrix.job-configs.pydantic-version }}
+        run: VIRTUAL_ENV=.venv uv pip install "pydantic~=$PYDANTIC_VERSION"
+
+      - name: "🧪 Run Core Tests"
+        shell: bash
+        run: |
+          make test
+
+      - name: "🧹 Verify Clean Working Directory"
+        shell: bash
+        run: |
+          set -eu
+
+          STATUS="$(git status)"
+          echo "$STATUS"
+
+          # grep will exit non-zero if the target message isn't found,
+          # and `set -e` above will cause the step to fail.
+          echo "$STATUS" | grep 'nothing to commit, working tree clean'
 
   # Verify integration tests compile without actually running them (faster feedback)
+  # Inlined from _compile_integration_test.yml: the fork dispatcher requires timeout-minutes, which reusable-workflow callers cannot set.
   compile-integration-tests:
     name: "Compile Integration Tests"
     needs: [build]
@@ -112,11 +181,44 @@ jobs:
     strategy:
       matrix:
         working-directory: ${{ fromJson(needs.build.outputs.dirs-to-test) }}
-    uses: ./.github/workflows/_compile_integration_test.yml
-    with:
-      working-directory: ${{ matrix.working-directory }}
-      python-version: "3.11"
-    secrets: inherit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # _compile_integration_test.yml sets only UV_FROZEN at workflow level (no UV_NO_SYNC);
+    # override this workflow's UV_NO_SYNC to preserve the reusable workflow's behaviour.
+    env:
+      UV_NO_SYNC: "false"
+    defaults:
+      run:
+        working-directory: ${{ matrix.working-directory }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: "🐍 Set up Python 3.11 + UV"
+        uses: "./.github/actions/uv_setup"
+        with:
+          python-version: "3.11"
+          cache-suffix: compile-integration-tests-${{ matrix.working-directory }}
+          working-directory: ${{ matrix.working-directory }}
+
+      - name: "📦 Install Integration Dependencies"
+        shell: bash
+        run: uv sync --group test --group test_integration
+
+      - name: "🔗 Check Integration Tests Compile"
+        shell: bash
+        run: uv run pytest -m compile tests/integration_tests
+
+      - name: "🧹 Verify Clean Working Directory"
+        shell: bash
+        run: |
+          set -eu
+
+          STATUS="$(git status)"
+          echo "$STATUS"
+
+          # grep will exit non-zero if the target message isn't found,
+          # and `set -e` above will cause the step to fail.
+          echo "$STATUS" | grep 'nothing to commit, working tree clean'
 
   # Run extended test suites that require additional dependencies
   extended-tests:
@@ -179,6 +281,7 @@ jobs:
     if: |
       always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       JOBS_JSON: ${{ toJSON(needs) }}
       RESULTS_JSON: ${{ toJSON(needs.*.result) }}
