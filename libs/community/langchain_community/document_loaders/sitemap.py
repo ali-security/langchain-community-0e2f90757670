@@ -196,7 +196,20 @@ class SitemapLoader(WebBaseLoader):
             if not loc:
                 continue
 
-            soup_child = self.scrape_all([loc.text], "xml")[0]
+            # Strip leading and trailing whitespace and newlines
+            loc_text = loc.text.strip()
+
+            # Nested sitemaps are fetched recursively, so the same-domain
+            # restriction must be enforced here as well. Otherwise a sitemap
+            # index entry pointing at an internal host would be requested
+            # server-side, bypassing `restrict_to_same_domain` (SSRF).
+            if self.restrict_to_same_domain and not self.is_local:
+                if _extract_scheme_and_domain(loc_text) != _extract_scheme_and_domain(
+                    self.web_path
+                ):
+                    continue
+
+            soup_child = self.scrape_all([loc_text], "xml")[0]
             els.extend(self.parse_sitemap(soup_child, depth=depth + 1))
         return els
 
